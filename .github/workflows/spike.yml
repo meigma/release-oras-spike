@@ -68,6 +68,24 @@ jobs:
             echo "arm64-sbom=$(jq -r '.sbom_paths.aarch64' report.json)"
           } >>"${GITHUB_OUTPUT}"
 
+      - name: Log in to GHCR for the signing and attestation tools
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Finding: cosign accepts per-invocation credentials, but
+          # actions/attest --push-to-registry resolves credentials only from the
+          # docker config, so a real login step is required. `cosign login`
+          # writes that config using an already-pinned tool, replacing the
+          # workflow's current `oras login` (inventory OP-09).
+          printf '%s' "${REGISTRY_PASSWORD}" |
+            cosign login ghcr.io --username "${REGISTRY_USERNAME}" --password-stdin
+
+          test -s "${HOME}/.docker/config.json"
+          echo "docker config written by cosign login"
+
       - name: Sign index and platform manifests recursively
         env:
           REFERENCE: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.index-digest }}
@@ -80,10 +98,7 @@ jobs:
           # which is a separate process with its own credential resolution. Pass
           # them per invocation instead of persisting a docker config, so the
           # "no persisted credential" property survives without `oras login`.
-          cosign sign --yes --recursive \
-            --registry-username "${REGISTRY_USERNAME}" \
-            --registry-password "${REGISTRY_PASSWORD}" \
-            "${REFERENCE}"
+          cosign sign --yes --recursive "${REFERENCE}"
 
       - name: Attest OCI image provenance
         id: provenance
@@ -122,10 +137,7 @@ jobs:
           set -euo pipefail
           for target in "${INDEX}" "${AMD64}" "${ARM64}"; do
             echo "== referrers for ${target} =="
-            cosign tree \
-              --registry-username "${REGISTRY_USERNAME}" \
-              --registry-password "${REGISTRY_PASSWORD}" \
-              "${target}"
+            cosign tree "${target}"
           done
 
       - name: Phase 2 — commit and verify public tags last
@@ -156,17 +168,19 @@ jobs:
           cosign verify \
             --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --registry-username "${REGISTRY_USERNAME}" \
-            --registry-password "${REGISTRY_PASSWORD}" \
             "${INDEX}"
 
           echo "== referrers on the tagged reference =="
-          cosign tree \
-            --registry-username "${REGISTRY_USERNAME}" \
-            --registry-password "${REGISTRY_PASSWORD}" \
-            "${TAGGED}"
+          cosign tree "${TAGGED}"
 
           gh attestation verify "oci://${INDEX}" --repo "${GITHUB_REPOSITORY}"
+
+      - name: Log out of GHCR
+        if: always()
+        run: |
+          set -euo pipefail
+          cosign logout ghcr.io || true
+          test ! -s "${HOME}/.docker/config.json" || jq -e '.auths | has("ghcr.io") | not' "${HOME}/.docker/config.json"
 
       - name: Upload spike evidence
         if: always()
