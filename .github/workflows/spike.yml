@@ -71,9 +71,19 @@ jobs:
       - name: Sign index and platform manifests recursively
         env:
           REFERENCE: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.index-digest }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          cosign sign --yes --recursive "${REFERENCE}"
+
+          # Finding: in-memory oras-go credentials do not authenticate cosign,
+          # which is a separate process with its own credential resolution. Pass
+          # them per invocation instead of persisting a docker config, so the
+          # "no persisted credential" property survives without `oras login`.
+          cosign sign --yes --recursive \
+            --registry-username "${REGISTRY_USERNAME}" \
+            --registry-password "${REGISTRY_PASSWORD}" \
+            "${REFERENCE}"
 
       - name: Attest OCI image provenance
         id: provenance
@@ -106,14 +116,17 @@ jobs:
           INDEX: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.index-digest }}
           AMD64: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.amd64-digest }}
           ARM64: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.arm64-digest }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "== index referrers =="
-          cosign tree "${INDEX}"
-          echo "== amd64 referrers =="
-          cosign tree "${AMD64}"
-          echo "== arm64 referrers =="
-          cosign tree "${ARM64}"
+          for target in "${INDEX}" "${AMD64}" "${ARM64}"; do
+            echo "== referrers for ${target} =="
+            cosign tree \
+              --registry-username "${REGISTRY_USERNAME}" \
+              --registry-password "${REGISTRY_PASSWORD}" \
+              "${target}"
+          done
 
       - name: Phase 2 — commit and verify public tags last
         env:
@@ -135,16 +148,23 @@ jobs:
           INDEX: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.index-digest }}
           TAGGED: ghcr.io/${{ github.repository }}:v${{ inputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           cosign verify \
             --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --registry-username "${REGISTRY_USERNAME}" \
+            --registry-password "${REGISTRY_PASSWORD}" \
             "${INDEX}"
 
           echo "== referrers on the tagged reference =="
-          cosign tree "${TAGGED}"
+          cosign tree \
+            --registry-username "${REGISTRY_USERNAME}" \
+            --registry-password "${REGISTRY_PASSWORD}" \
+            "${TAGGED}"
 
           gh attestation verify "oci://${INDEX}" --repo "${GITHUB_REPOSITORY}"
 
