@@ -154,11 +154,37 @@ func buildPlatform(
 	manifestDesc.Platform = &v1.Platform{OS: "linux", Architecture: plat.arch}
 
 	sbomPath := filepath.Join(root, fmt.Sprintf("sbom-%s.spdx.json", plat.apkArch))
+	// Minimal but schema-valid SPDX 2.3: actions/attest rejects anything that is
+	// not recognizably SPDX or CycloneDX JSON.
 	sbom := map[string]any{
-		"spdxVersion": "SPDX-2.3",
-		"name":        fmt.Sprintf("release-cli-%s-r0", version),
-		"packages": []map[string]string{
-			{"name": "release-cli", "versionInfo": version + "-r0"},
+		"spdxVersion":       "SPDX-2.3",
+		"dataLicense":       "CC0-1.0",
+		"SPDXID":            "SPDXRef-DOCUMENT",
+		"name":              fmt.Sprintf("release-cli-%s-%s", version, plat.apkArch),
+		"documentNamespace": fmt.Sprintf("https://spike.invalid/release-cli/%s/%s", version, plat.apkArch),
+		"creationInfo": map[string]any{
+			"created":  "2026-08-18T00:00:00Z",
+			"creators": []string{"Tool: release-cli-spike"},
+		},
+		"documentDescribes": []string{"SPDXRef-Package-application"},
+		"packages": []map[string]any{
+			{
+				"SPDXID":           "SPDXRef-Package-application",
+				"name":             "release-cli",
+				"versionInfo":      version + "-r0",
+				"downloadLocation": "NOASSERTION",
+				"licenseConcluded": "NOASSERTION",
+				"licenseDeclared":  "NOASSERTION",
+				"copyrightText":    "NOASSERTION",
+				"filesAnalyzed":    false,
+			},
+		},
+		"relationships": []map[string]string{
+			{
+				"spdxElementId":      "SPDXRef-DOCUMENT",
+				"relationshipType":   "DESCRIBES",
+				"relatedSpdxElement": "SPDXRef-Package-application",
+			},
 		},
 	}
 	sbomBytes, err := json.MarshalIndent(sbom, "", "  ")

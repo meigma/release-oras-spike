@@ -179,8 +179,16 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          cosign logout ghcr.io || true
-          test ! -s "${HOME}/.docker/config.json" || jq -e '.auths | has("ghcr.io") | not' "${HOME}/.docker/config.json"
+          # Finding: cosign has no `logout` subcommand, so credential cleanup is
+          # a docker-config edit rather than a tool call (the current workflow's
+          # OP-20 `oras logout` has no cosign equivalent).
+          config="${HOME}/.docker/config.json"
+          if [[ -s "${config}" ]]; then
+            jq 'if .auths then .auths |= del(."ghcr.io") else . end' "${config}" >"${config}.clean"
+            mv "${config}.clean" "${config}"
+            jq -e '(.auths // {}) | has("ghcr.io") | not' "${config}" >/dev/null
+          fi
+          echo "ghcr.io credential removed"
 
       - name: Upload spike evidence
         if: always()
