@@ -1,0 +1,159 @@
+name: Spike B — oras-go GHCR parity
+
+# Throwaway spike. Proves oras-go v2 reproduces the current ORAS 1.3.3
+# publication contract on real GHCR, that keyless Cosign signatures and three
+# actions/attest referrers coexist on the published digests, and that all trust
+# metadata can precede public tags (inventory invariant 14). Action pins and tool
+# versions are copied from meigma/release so the spike tests the real contract.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Synthetic release version to publish.
+        required: true
+        default: 9.9.9
+        type: string
+
+permissions: {}
+
+jobs:
+  parity:
+    name: GHCR parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up tools
+        uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+        with:
+          version: 2026.8.8
+          mise_toml: |
+            [tools]
+            go = "1.26.6"
+            "aqua:sigstore/cosign" = "3.1.3"
+          install_args: go aqua:sigstore/cosign
+          cache: true
+
+      - name: Phase 1 — publish by digest, no tags
+        id: publish
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          go run . \
+            -mode=remote \
+            -ref="${IMAGE_REPOSITORY}" \
+            -version="${VERSION}" \
+            -stop-before-tags \
+            | tee report.json
+
+          {
+            echo "index-digest=$(jq -r .index_digest report.json)"
+            echo "amd64-digest=$(jq -r .platform_digests.amd64 report.json)"
+            echo "arm64-digest=$(jq -r .platform_digests.arm64 report.json)"
+            echo "amd64-sbom=$(jq -r '.sbom_paths.x86_64' report.json)"
+            echo "arm64-sbom=$(jq -r '.sbom_paths.aarch64' report.json)"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Sign index and platform manifests recursively
+        env:
+          REFERENCE: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.index-digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes --recursive "${REFERENCE}"
+
+      - name: Attest OCI image provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.publish.outputs.index-digest }}
+          push-to-registry: true
+
+      - name: Attest amd64 image SBOM
+        id: amd64-sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.publish.outputs.amd64-digest }}
+          sbom-path: ${{ steps.publish.outputs.amd64-sbom }}
+          push-to-registry: true
+
+      - name: Attest arm64 image SBOM
+        id: arm64-sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.publish.outputs.arm64-digest }}
+          sbom-path: ${{ steps.publish.outputs.arm64-sbom }}
+          push-to-registry: true
+
+      - name: Inspect referrer coexistence before any tag exists
+        env:
+          INDEX: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.index-digest }}
+          AMD64: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.amd64-digest }}
+          ARM64: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.arm64-digest }}
+        run: |
+          set -euo pipefail
+          echo "== index referrers =="
+          cosign tree "${INDEX}"
+          echo "== amd64 referrers =="
+          cosign tree "${AMD64}"
+          echo "== arm64 referrers =="
+          cosign tree "${ARM64}"
+
+      - name: Phase 2 — commit and verify public tags last
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          go run . \
+            -mode=remote \
+            -ref="${IMAGE_REPOSITORY}" \
+            -version="${VERSION}" \
+            -tags-only \
+            | tee tags.json
+
+      - name: Verify trust metadata after tagging
+        env:
+          INDEX: ghcr.io/${{ github.repository }}@${{ steps.publish.outputs.index-digest }}
+          TAGGED: ghcr.io/${{ github.repository }}:v${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cosign verify \
+            --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${INDEX}"
+
+          echo "== referrers on the tagged reference =="
+          cosign tree "${TAGGED}"
+
+          gh attestation verify "oci://${INDEX}" --repo "${GITHUB_REPOSITORY}"
+
+      - name: Upload spike evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-b-evidence
+          path: |
+            report.json
+            tags.json
+          if-no-files-found: warn
